@@ -4,6 +4,82 @@ const { createObjectCsvWriter } = require("csv-writer");
 
 const tickets = [];
 
+
+
+function loadCorpus() {
+    const basePath = "../data";
+    let docs = [];
+
+    function readFolder(folderPath) {
+        const files = fs.readdirSync(folderPath);
+
+        for(const file of files) {
+            const fullPath = `${folderPath}/${file}`;
+            const stat = fs.statSync(fullPath);
+
+            if (stat.isDirectory()) {
+                readFolder(fullPath)
+            } else {
+                const content = fs.readFileSync(fullPath, "utf-8");
+                docs.push(content)
+            }
+        }
+    }
+
+    readFolder(basePath);
+    return docs;
+}
+
+
+function cleanText(text) {
+  return text
+    .toLowerCase()
+    .replace(/[^\w\s]/g, "")
+    .split(/\s+/)
+    .filter(word => word.length > 2 && ![
+      "the","and","for","with","this","that","have","from","your","please","help"
+    ].includes(word));
+}
+
+
+function retrieveRelevantDocs(issue, docs) {
+  const keywords = cleanText(issue);
+
+  let bestDoc = "";
+  let maxScore = 0;
+
+  for (const doc of docs) {
+    const lowerDoc = doc.toLowerCase();
+
+    let score = 0;
+
+    for (const word of keywords) {
+      if (lowerDoc.includes(word)) {
+        score += 1;
+      }
+    }
+
+    // phrase boost
+    if (lowerDoc.includes(issue.slice(0, 20))) {
+      score += 3;
+    }
+
+    if (score > maxScore) {
+      maxScore = score;
+      bestDoc = doc;
+    }
+  }
+
+  // 🚨 IMPORTANT: if still weak match → return empty
+  if (maxScore < 2) {
+    return "";
+  }
+
+  return bestDoc.slice(0, 400);
+}
+
+
+
 fs.createReadStream("../support_tickets/support_tickets.csv")   
     .pipe(csv())
     .on("data", (row) => tickets.push(row))
@@ -12,10 +88,19 @@ fs.createReadStream("../support_tickets/support_tickets.csv")
 
         const results = [];
 
+        const corpusDocs = loadCorpus();
 
         for(const ticket of tickets) {
-            const issue = (ticket.issue || "").toLowerCase();
+            const issue =
+                (ticket.issue ||
+                    ticket.Issue ||
+                    ticket["issue"] ||
+                    ticket["Issue"] ||
+                    "").toLowerCase();
+            console.log("ROW:", ticket);
             const company = ticket.company || "";
+
+            const context = retrieveRelevantDocs(issue, corpusDocs)
 
             //request type
             let request_type = "product_issue";
@@ -46,16 +131,28 @@ fs.createReadStream("../support_tickets/support_tickets.csv")
                 product_area = "api";
 
             // response
-            let response =
-                status === "escalated"
-                ? "This issue requires human support due to its sensitive nature."
-                : "We have received your request and will assist you.";
+            let response;
+            let justification;
 
-            // justification
-            let justification =
-                status === "escalated"
-                ? "Sensitive keywords detected (payment/fraud)"
-                : "Handled as general support query";
+            if (status === "escalated") {
+                response =
+                    "This issue involves sensitive information and has been escalated to a human support agent.";
+                justification =
+                    "Escalated due to sensitive issue (fraud/payment/account access)";
+            } else if (!context) {
+                response =
+                    "We could not find relevant information in our support documentation. This case has been escalated for further review.";
+                status = "escalated";
+                justification = "No relevant support documentation found";
+            } else {
+                response = `Here’s what we found:\n${context}`;
+                justification =
+                    "Response generated using retrieved support documentation from corpus";
+            }
+
+
+            console.log("ISSUE:", issue);
+            console.log("CONTEXT LENGTH:", context.length);
 
             results.push({
                 status,
